@@ -36,20 +36,57 @@ const INJECT_CODE = () => {
     });
   } catch(e){}
 
-  // 4. Defuse global click hijackers
+  // 4. Defuse click hijackers (on ANY element, not just document/body)
   const _ael = EventTarget.prototype.addEventListener;
   const BAD = new Set(["click","mousedown","mouseup","pointerdown","pointerup","touchstart","touchend"]);
+  const ADP = ["_0x","window.open","window['open']",'window["open"]',
+    "location.href","location.assign","location.replace","location['href']",
+    'location["href"]',"popunder","runPop"];
   EventTarget.prototype.addEventListener = function(type, fn, opts) {
-    if (BAD.has(type) && (this===window||this===document||this===document.documentElement||this===document.body)) {
+    if (BAD.has(type)) {
       const s = fn?.toString?.() || "";
-      if (s.includes("_0x")||s.includes("window.open")||s.includes("window['open']")||s.includes('window["open"]')
-        ||s.includes("location.href")||s.includes("location.assign")||s.includes("location.replace")
-        ||s.includes("location['href']")||s.includes('location["href"]')||s.includes("popunder")||s.includes("runPop")) {
-        return;
-      }
+      if (ADP.some(p => s.includes(p))) return;
     }
     return _ael.call(this, type, fn, opts);
   };
+
+  // 4b. Capture-phase click guard: block navigation to ad domains
+  const HOSTS = new Set([window.location.hostname,
+    "istreameast.is","embedsports.top","pooembed.eu"]);
+  document.addEventListener("click", function(e) {
+    const a = e.target.closest("a");
+    if (!a) return;
+    const href = a.href || "";
+    if (!href || href.startsWith("javascript:")) return;
+    try {
+      const host = new URL(href, window.location.href).hostname;
+      if (HOSTS.has(host)) return;
+      if (host.includes("discord")||host.includes("twitter")||host.includes("x.com")) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    } catch(ex){}
+  }, true);
+
+  // 4c. Block location.href hijacking
+  const _loc = Object.getOwnPropertyDescriptor(window,"location")
+    ||Object.getOwnPropertyDescriptor(Window.prototype,"location");
+  if (_loc && _loc.set) {
+    const _origSet = _loc.set;
+    try {
+      Object.defineProperty(window, "location", {
+        get: _loc.get,
+        set(val) {
+          const s = typeof val === "string" ? val : "";
+          try {
+            const host = new URL(s, window.location.href).hostname;
+            if (!HOSTS.has(host)) return;
+          } catch(ex){}
+          _origSet.call(this, val);
+        },
+        configurable: true
+      });
+    } catch(e){}
+  }
 
   // 5. Block anti-adblock
   const _si = window.setInterval;
@@ -73,6 +110,30 @@ const INJECT_CODE = () => {
     return _f.call(window,url,...a);
   };
 
+  // 7. Intercept createElement to block dynamically loaded ad scripts
+  const _ce = document.createElement.bind(document);
+  document.createElement = function(tag, opts) {
+    const el = _ce(tag, opts);
+    if (tag.toLowerCase() === "script") {
+      const _sd = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype,"src")
+        ||Object.getOwnPropertyDescriptor(el.__proto__,"src");
+      if (_sd) {
+        Object.defineProperty(el, "src", {
+          get(){ return _sd.get.call(this); },
+          set(val){
+            const v = (val||"").toLowerCase();
+            if (v.includes("adcash")||v.includes("tag.min.js")||v.includes("popads")
+              ||v.includes("propellerads")||v.includes("clickadu")||v.includes("exoclick")
+              ||v.includes("adsterra")||v.includes("hilltopads")) return;
+            _sd.set.call(this, val);
+          },
+          configurable: true
+        });
+      }
+    }
+    return el;
+  };
+
   console.log("[SAB] MAIN world OK:", window.location.hostname);
 };
 
@@ -94,5 +155,5 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  console.log("Stream Ad Blocker v5 installed");
+  console.log("Stream Ad Blocker installed");
 });

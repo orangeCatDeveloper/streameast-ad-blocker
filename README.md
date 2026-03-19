@@ -1,84 +1,123 @@
 # Stream Ad Blocker
 
-A Chrome extension that blocks overlay ads, click hijacking, popunders, and malicious downloads on streaming sites like istreameast.
+**One click to play. No more ads.**
 
-## The Problem
+Watch NBA, NFL, NHL, MLB, and other live sports on free streaming sites — without popups, overlays, or click hijacking. Just click play and it works.
 
-Free streaming sites layer multiple ad mechanisms on top of the video player:
+![Chrome Web Store](https://img.shields.io/badge/Chrome-Extension-blue?logo=googlechrome)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Manifest](https://img.shields.io/badge/Manifest-V3-orange)
 
-- **Popunders** — `window.open()` triggered by click events opens ad tabs in the background
-- **Click hijacking** — Obfuscated event listeners on `document/body` intercept your clicks before they reach the video player
-- **Overlay ads** — Invisible `<div>` elements with max `z-index` cover the player; clicking anywhere triggers an ad redirect
-- **Fake scripts** — Ad SDKs disguised as legitimate libraries (e.g. `jquery.min.js` that's actually a 610KB ad loader)
-- **Anti-adblock detection** — Visibility polling and timeout checks to detect ad blockers
-- **Hidden iframes** — 1×1 invisible iframes for tracking and ad refresh
+## Before vs After
 
-You end up clicking 5-10 times before the video actually plays.
+| Without Extension | With Extension |
+|---|---|
+| Click play → ad tab opens | Click play → Lakers vs Rockets starts |
+| Click again → sportsbetting.ag popup | No popups, no redirects |
+| Click 5-10 times → game finally loads | First click works |
+| Random .exe downloads | Downloads blocked |
+
+## Supported Sites
+
+- istreameast
+- streameast
+- Other sites using the same ad SDK (`aclib` / Adcash popunder system)
+
+> Works on any site that uses `aclib.runPop` for popunders — which covers most free streaming sites.
+
+## What It Blocks
+
+- **Popunder ads** — new tabs opening behind your current window
+- **Click hijacking** — your first N clicks being stolen by ad scripts
+- **Overlay ads** — invisible layers covering the video player
+- **Fake scripts** — ad SDKs disguised as `jquery.min.js`
+- **Malicious downloads** — `.exe`, `.dmg`, `.apk` files triggered by clicks
+- **Tracking** — analytics and fingerprinting scripts
+- **Ad redirects** — navigation to betting/gambling sites like sportsbetting.ag
+
+## Install
+
+1. Clone this repo:
+   ```bash
+   git clone https://github.com/orangeCatDeveloper/streameast-ad-blocker.git
+   ```
+2. Open `chrome://extensions/` in Chrome
+3. Enable **Developer mode** (top right)
+4. Click **Load unpacked** → select the cloned folder
+5. Done. Go to a streaming site and click play.
 
 ## How It Works
 
-The extension uses a three-layer approach:
+Three layers of protection:
 
-### 1. Network-Level Blocking (`rules.json`)
-Uses Chrome's `declarativeNetRequest` API to block requests to 38 known ad domains, ad scripts (by filename), and ad landing pages before they even load.
+**Layer 1 — Network Blocking** (`rules.json`)
+Blocks 38 known ad domains and scripts before they load, using Chrome's `declarativeNetRequest` API.
 
-### 2. MAIN World Script Injection (`inject.js`)
-Injected into the page's JavaScript context via `chrome.scripting.executeScript` to override browser APIs:
+**Layer 2 — JavaScript API Override** (`inject.js` → MAIN world)
+Overrides browser APIs that ads abuse:
+- `window.open` → blocked (kills popunders)
+- `aclib.runPop` → neutered via `Proxy` (the ad SDK runs but does nothing)
+- `addEventListener` → filters out obfuscated click hijack handlers
+- `document.createElement("script")` → blocks dynamically loaded ad scripts
 
-- **`window.open`** → Returns a fake window object (blocks popunders)
-- **`aclib`** → Wrapped in a `Proxy` so `runPop`, `runAutoTag`, etc. always return no-ops, regardless of what the ad SDK assigns
-- **`addEventListener`** → Filters out global click handlers containing obfuscated code (`_0x` patterns) or redirect logic
-- **`setInterval/setTimeout`** → Blocks anti-adblock visibility polling and detection timers
-- **`fetch`** → Blocks tracking requests to analytics endpoints
+**Layer 3 — DOM Cleanup** (`content.js` → isolated world)
+Removes ad elements from the page:
+- Strips overlay `<div>`s with high `z-index`
+- Removes hidden 1×1 tracking iframes
+- Blocks the fake `jquery.min.js` (actually a 610KB ad loader)
 
-### 3. DOM Cleanup (`content.js`)
-Runs in the isolated world to manipulate the DOM:
+## Technical Deep Dive
 
-- **MutationObserver** removes ad scripts and hidden iframes as they're added
-- **Periodic cleanup** removes overlay elements with absurdly high `z-index`
-- **Whitelist** ensures the actual video player iframe chain is never touched
+<details>
+<summary>Why use a Proxy for aclib?</summary>
 
-## Installation
+The ad SDK creates `window.aclib` and assigns methods like `runPop`. Simply replacing `runPop` with a no-op doesn't work — the SDK can reassign it after your override.
 
-1. Clone this repo
-2. Open `chrome://extensions/` in Chrome
-3. Enable **Developer mode** (top right toggle)
-4. Click **Load unpacked** and select the `stream-ad-blocker` folder
-5. Navigate to a streaming site — ads should be blocked automatically
+A `Proxy` wraps the entire object and intercepts reads. No matter what the SDK assigns internally, any access to `aclib.runPop` always returns a no-op:
+
+```js
+Object.defineProperty(window, "aclib", {
+  set(v) {
+    _aclib = new Proxy(v, {
+      get(target, prop) {
+        return AD_METHODS.has(prop) ? noop : target[prop];
+      }
+    });
+  }
+});
+```
+</details>
+
+<details>
+<summary>Why not use manifest "world": "MAIN"?</summary>
+
+Chrome's manifest-based `"world": "MAIN"` doesn't work reliably across all Chromium browsers (Arc, Brave, older Edge). We use `chrome.scripting.executeScript` from the background service worker instead, with a `web_accessible_resources` fallback. Both run before page scripts.
+</details>
+
+<details>
+<summary>The fake jQuery trick</summary>
+
+Some embed pages (like embedsports.top) load `/js/jquery.min.js` — but it's not jQuery. It's a 610KB obfuscated ad SDK (starts with `window['ZpQw9XkLmN8c3vR3']`). The extension blocks this at both the network level and DOM level.
+</details>
 
 ## Project Structure
 
 ```
-stream-ad-blocker/
-├── manifest.json     # Extension config, permissions, content script registration
-├── background.js     # Service worker — injects MAIN world script on every navigation
-├── inject.js         # MAIN world script — overrides window.open, aclib, addEventListener
-├── content.js        # Isolated world script — DOM cleanup, removes ad elements
-├── rules.json        # declarativeNetRequest rules — blocks 38 ad domains/scripts
-├── popup.html        # Extension popup UI
-├── popup.js          # Popup logic
+├── manifest.json     # Extension config (Manifest V3)
+├── background.js     # Service worker — MAIN world injection via executeScript
+├── inject.js         # Overrides window.open, aclib, addEventListener, createElement
+├── content.js        # DOM cleanup — MutationObserver + periodic overlay removal
+├── rules.json        # declarativeNetRequest — 38 blocked domains/scripts
+├── popup.html/js     # Extension popup UI
 └── icons/            # Extension icons
 ```
 
-## Technical Details
+## Contributing
 
-### Why not just use `"world": "MAIN"` in the manifest?
-
-Chrome's manifest-based `"world": "MAIN"` content script injection doesn't work reliably across all Chromium-based browsers. This extension uses `chrome.scripting.executeScript` from the background service worker (triggered by `webNavigation.onCommitted`) as the primary injection method, with a `web_accessible_resources` script tag injection as a fallback.
-
-### Why use a Proxy for aclib?
-
-The ad SDK's obfuscated code creates the `aclib` object and assigns methods like `runPop`. Simply replacing `runPop` with a no-op doesn't work because the SDK can reassign it after our override. A `Proxy` intercepts property reads at the getter level — no matter what the SDK assigns internally, any read of `runPop` always returns a no-op function.
-
-### The fake jQuery trick
-
-Some streaming embed pages load their ad SDK as `/js/jquery.min.js`. It's not jQuery at all — it's a 610KB obfuscated ad loader (identical to the main page's ad script). The extension blocks this at both the network level (`declarativeNetRequest`) and DOM level (`MutationObserver`).
-
-## Browser Support
-
-- Chrome 111+
-- Edge 111+
-- Other Chromium-based browsers (Brave, Arc, etc.)
+Found a site where ads still get through? [Open an issue](../../issues) with:
+1. The site URL
+2. What ads you see (popup? overlay? redirect?)
+3. Console errors (F12 → Console → look for `[SAB]` logs)
 
 ## License
 
